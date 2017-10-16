@@ -140,6 +140,8 @@ vae=VAE().cuda()
 optimizer=optim.Adam(vae.parameters(),lr=lr_rate)
 datalist=ld.getlist('list_attr_train1.txt')
 iternow1=0
+state_dict = torch.load('../vaemodel/vae_iter_4800.pth.tar')
+vae.load_state_dict(state_dict['VAE'])
 
 for iter1 in xrange(num_iter):
     vae.zero_grad()
@@ -161,6 +163,9 @@ for iter1 in xrange(num_iter):
         tov.save_image(saveim,'../vaeimg/recon'+str(iter1)+'.jpg')
         saveim=imgpo.cpu().data
         tov.save_image(saveim,'../vaeimg/img'+str(iter1)+'.jpg')
+        saveim=mask.cpu().data
+        tov.save_image(saveim,'../vaeimg/mask'+str(iter1)+'.jpg')
+    if iter1 %5000==0:
         save_name = '../vaemodel/{}_iter_{}.pth.tar'.format('vae', iter1)
         torch.save({'VAE': vae.state_dict()}, save_name)
         logging.info('save model to {}'.format(save_name))
