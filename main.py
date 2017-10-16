@@ -152,16 +152,21 @@ for iter1 in xrange(num_iter):
     optimizer.step()
     
     if iter1%100==0:
-        outinfo=str(loss1)+' '+str(loss1)
+        outinfo=str(iter1)+str(loss1)+' '+str(loss1)
         logging.info(outinfo)
         print outinfo
         print iter1
     if iter1 % 200 == 0:
         saveim=imgpo_re.cpu().data
+        tov.save_image(saveim,'../vaeimg/recon'+str(iter1)+'.jpg')
+        saveim=imgpo.cpu().data
+        tov.save_image(saveim,'../vaeimg/img'+str(iter1)+'.jpg')
+        save_name = '../vaemodel/{}_iter_{}.pth.tar'.format('vae', iter1)
+        torch.save({'VAE': vae.state_dict()}, save_name)
+        logging.info('save model to {}'.format(save_name))
+    if iter1 % 2000 == 0:
+        saveim=imgpo_re.cpu().data
         tov.save_image(saveim,'img/recon'+str(iter1)+'.jpg')
         saveim=imgpo.cpu().data
         tov.save_image(saveim,'img/img'+str(iter1)+'.jpg')
-        save_name = 'model/{}_iter_{}.pth.tar'.format('vae', iter1)
-        torch.save({'VAE': vae.state_dict()}, save_name)
-        logging.info('save model to {}'.format(save_name))
 
