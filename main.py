@@ -1,177 +1,200 @@
-import torch
-from torch.autograd import Variable as Vb
-import torch.nn as nn
-import torch.nn.functional as F
+import argparse
+from torch.autograd import Variable
+from vaegan import *
+from data_loader import get_loader
+import torchvision.utils as vutils
+import torch.backends.cudnn as cudnn
+import models.dcgan as dcgan
+import models.mlp as mlp
 import torch.nn.init as init
 import torchvision.models
 import torch.optim as optim
-import load_data as ld
-import os
 import logging
-import torchvision.utils  as tov
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-class encoder(nn.Module):
-    def __init__(self):
-        super(encoder,self).__init__()
-        self.main = nn.Sequential(
-            # input is 3 x 64 x 64
-            nn.Conv2d(3, 64, 3, 1, 1, bias=False),
-            nn.LeakyReLU(0.2, inplace=True),
+import pdb
+import random
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-            nn.Conv2d(64, 64, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2, inplace=True),
+parser = argparse.ArgumentParser()
+parser.add_argument('--image_path', type=str, default='./randomcrop_resize_64/')
+parser.add_argument('--num_workers', type=int, default=2)
+parser.add_argument('--image_size', type=int, default=64)
+parser.add_argument('--batch_size', type=int, default=64, help='input batch size')
+parser.add_argument('--lr_vae', type=float, default=0.0002, help='vae learning rate, default=0.001')
+parser.add_argument('--lr_gan', type=float, default=0.0001, help='gan learning rate, default=0.0002')
+parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
+parser.add_argument('--cuda', action='store_true', default=True, help='enables cuda')
+parser.add_argument('--ngpu'  , type=int, default=1, help='number of GPUs to use')
+parser.add_argument('--n_extra_layers', type=int, default=0, help='Number of extra layers on gen and disc')
+parser.add_argument('--clamp_lower', type=float, default=-0.01)
+parser.add_argument('--clamp_upper', type=float, default=0.01)
+parser.add_argument('--experiment', default=None, help='Where to store samples and models')
+parser.add_argument('--nc', type=int, default=3, help='input image channels')
+parser.add_argument('--nz', type=int, default=100, help='size of the latent z vector')
+parser.add_argument('--ngf', type=int, default=64)
+parser.add_argument('--ndf', type=int, default=64)
+parser.add_argument('--niter', type=int, default=200, help='number of epochs to train for')
+parser.add_argument('--Diters', type=int, default=1, help='number of D iters per each G iter')
+parser.add_argument('--mlp_D', action='store_true', default = False, help='use MLP for D')
+opt = parser.parse_args()
+print(opt)
+if opt.experiment is None:
+    opt.experiment = 'samples'
+os.system('mkdir {0}'.format(opt.experiment))
+logging.basicConfig(filename = '{0}/train.log'.format(opt.experiment), level=logging.INFO)
+opt.manualSeed = random.randint(1, 10000) # fix seed
+print("Random Seed: ", opt.manualSeed)
+random.seed(opt.manualSeed)
+torch.manual_seed(opt.manualSeed)
 
-            nn.Conv2d(64, 64, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2, inplace=True),
-            # state size. 64 x 32 x 32
-            nn.Conv2d(64, 128, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2, inplace=True),
+cudnn.benchmark = True
 
-            nn.Conv2d(128, 128, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2, inplace=True)
-            )
-        self.mask=nn.Sequential(
-            # state size. 128 x 16 x 16
-            nn.Conv2d(128, 128, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2, inplace=True),
+dataloader = get_loader(image_path=opt.image_path,image_size=opt.image_size,batch_size=opt.batch_size, num_workers=opt.num_workers)
+ngpu = int(opt.ngpu)
+nz = int(opt.nz)
+ngf = int(opt.ngf)
+ndf = int(opt.ndf)
+nc = int(opt.nc)
+n_extra_layers = int(opt.n_extra_layers)
 
-            nn.Conv2d(128,1,3,1,1,bias=False),
-            nn.Sigmoid()
-            )
-        self.texture=nn.Sequential(
-            nn.Conv2d(128, 128, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2, inplace=True),
+def weights_init(m):
+    classname = m.__class__.__name__
+    if classname.find('Conv') != -1:
+        m.weight.data.normal_(0.0, 0.02)
+    elif classname.find('BatchNorm') != -1:
+        m.weight.data.normal_(1.0, 0.02)
+        m.bias.data.fill_(0)
 
-            nn.Conv2d(128, 128, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2, inplace=True),
+input = torch.FloatTensor(opt.batch_size, 3, opt.image_size, opt.image_size)
+one = torch.FloatTensor([1])
+mone = one * -1
+vae=VAE()
 
-            nn.Conv2d(128, 128, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2, inplace=True),
+if opt.mlp_D:
+    netD = mlp.MLP_D(opt.image_size, nz, nc, ndf, ngpu)
+else:
+    netD = dcgan.DCGAN_D(opt.image_size, nz, nc, ndf, ngpu, n_extra_layers)
+    netD.apply(weights_init)
 
-            )
-        self.fc1=nn.Linear(4*4*128,128)
-        self.fc2=nn.Linear(4*4*128,128)
-    def forward(self,x):
-        feature=self.main(x)
-        outmask= self.mask(feature)
-        temp=self.texture(feature)
-        mu=self.fc1(temp.view(-1,4*4*128))
-        logvar=self.fc2(temp.view(-1,4*4*128))
-        return outmask,mu,logvar
-class decoder(nn.Module):
-    def __init__(self):
-        super(decoder,self).__init__()
-        self.baseunit=nn.Sequential(
-            nn.ConvTranspose2d(128, 128* 8, 4, 1, 0, bias=False),
-            nn.BatchNorm2d(128*8),
-            nn.ReLU(True),
-            # state size. (128*8) x 4 x 4
-            nn.ConvTranspose2d(128 * 8, 128 * 4, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(128 * 4),
-            nn.ReLU(True),
-            # state size. (128*4) x 8 x 8
-            nn.ConvTranspose2d(128 * 4, 128 * 2, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(128 * 2),
-            nn.ReLU(True)
-            # state size. (128*2) x 16 x 16
-            )
-        self.conv2=nn.Sequential(
-            nn.ConvTranspose2d(128 * 2+1, 128, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.ReLU(True),
-            # state size. (128) x 32 x 32
-            nn.ConvTranspose2d(128, 3, 4, 2, 1, bias=False),
-            nn.Sigmoid()
-            
-            # state size. (nc) x 64 x 64
-            )
-    def forward(self,mask,code):
-        x=code.view(-1,128,1,1)
-        temp=self.baseunit(x)
-        #print temp.size()
-        #print mask.size()
-        temp1=torch.cat([temp,mask],1)
-        out=self.conv2(temp1)
-        return out
+if opt.cuda:
+    netD.cuda()
+    vae.cuda()
+    input = input.cuda()
+    one, mone = one.cuda(), mone.cuda()
 
-def loss_function(recon_x, x, mu, logvar):
-    BCE = F.binary_cross_entropy(recon_x, x)
+optimizerD = optim.Adam(netD.parameters(), lr=opt.lr_gan, betas=(opt.beta1, 0.999))
+optimizerDec = optim.Adam(vae.deco.parameters(),lr=opt.lr_vae)
+optimizerVae = optim.Adam(vae.parameters(),lr=opt.lr_vae)
+optimizer = optim.Adam(vae.parameters(),lr=opt.lr_vae)
 
-    # see Appendix B from VAE paper:
-    # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
-    # https://arxiv.org/abs/1312.6114
-    # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-    KLD = torch.mean(-0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()))
-    # Normalise by same number of elements as in reconstruction
-    #KLD /= args.batch_size * 784
+checkpoint = torch.load('vae_iter_260000.pth.tar')
+vae.load_state_dict(checkpoint['VAE'])
 
-    return BCE + KLD
-class VAE(nn.Module):
-    def __init__(self):
-        super(VAE, self).__init__()
-        self.enco=encoder()
-        self.deco=decoder()
-    def reparameterize(self, mu, logvar):
-        if self.training:
-          std = logvar.mul(0.5).exp_()
-          eps = Vb(std.data.new(std.size()).normal_())
-          return eps.mul(std).add_(mu)
-        else:
-          return mu
-    def forward(self,x):
-        mask,mu,logvar=self.enco(x)
-        z=self.reparameterize(mu, logvar)
-        x_re=self.deco(mask,z)
-        mask1,mu1,logvar1=self.enco(x_re)
-        return x_re,mu,logvar,mask,mask1
-lr_rate=0.001
-num_iter=500000
-bs=64
-logging.basicConfig(filename='log/vae.log', level=logging.INFO)
-vae=VAE().cuda()
-optimizer=optim.Adam(vae.parameters(),lr=lr_rate)
-datalist=ld.getlist('list_attr_train1.txt')
-iternow1=0
-state_dict = torch.load('../vaemodel/vae_iter_4800.pth.tar')
-vae.load_state_dict(state_dict['VAE'])
+gen_iterations = 0
+for epoch in range( opt.niter):
+    print ('loading data...')
+    data_iter = iter(dataloader)
+    print ('finish')
+    i = 0
+    print (len(dataloader))
+    while i < len(dataloader):
+        ############################
+        # (1) Update D network
+        ###########################
+        for p in netD.parameters(): # reset requires_grad
+            p.requires_grad = True # they are set to False below in netG update
 
-for iter1 in xrange(num_iter):
-    vae.zero_grad()
-    imgpo,iternow1=ld.load_data('/ssd/randomcrop_resize_64/','list_attr_train1.txt',datalist,iternow1,bs)
-    imgpo_re,mu,logvar,mask,mask1=vae(imgpo)
-    loss1=loss_function(imgpo_re,imgpo,mu,logvar)
-    loss2=torch.sum(torch.abs(mask-mask1))/bs
-    loss=loss1+0.001*loss2
-    loss.backward()
-    optimizer.step()
-    
-    if iter1%100==0:
-        outinfo=str(iter1)+str(loss1)+' '+str(loss1)
-        logging.info(outinfo)
-        print outinfo
-        print iter1
-    if iter1 % 200 == 0:
-        saveim=imgpo_re.cpu().data
-        tov.save_image(saveim,'../vaeimg/recon'+str(iter1)+'.jpg')
-        saveim=imgpo.cpu().data
-        tov.save_image(saveim,'../vaeimg/img'+str(iter1)+'.jpg')
-        saveim=mask.cpu().data
-        tov.save_image(saveim,'../vaeimg/mask'+str(iter1)+'.jpg')
-    if iter1 %5000==0:
-        save_name = '../vaemodel/{}_iter_{}.pth.tar'.format('vae', iter1)
-        torch.save({'VAE': vae.state_dict()}, save_name)
-        logging.info('save model to {}'.format(save_name))
-    if iter1 % 2000 == 0:
-        saveim=imgpo_re.cpu().data
-        tov.save_image(saveim,'img/recon'+str(iter1)+'.jpg')
-        saveim=imgpo.cpu().data
-        tov.save_image(saveim,'img/img'+str(iter1)+'.jpg')
+        #if gen_iterations < 25 or gen_iterations % 500 == 0:
+        #    Diters = 100
+        #else:
+        Diters = opt.Diters
+        j = 0
+        while j < Diters and i < len(dataloader):
+            j += 1
 
+            # clamp parameters to a cube
+            for p in netD.parameters():
+                p.data.clamp_(opt.clamp_lower, opt.clamp_upper)
+            data = data_iter.next()
+            i += 1
+            # train with real
+            real_cpu = data
+            netD.zero_grad()
+            batch_size = real_cpu.size(0)
+            if opt.cuda:
+                real_cpu = real_cpu.cuda()
+            input.resize_as_(real_cpu).copy_(real_cpu)
+            inputv = Variable(input)
+            errD_real = netD(inputv)
+            errD_real.backward(one, retain_graph=True)
+
+            # train with fake
+            recon, mu, logvar, mu1, logvar1, mask0, mask1 = vae(inputv)
+            mask_sample = Variable(mu.data.new(mu1.size()).normal_())  # gauss noise bs,256 mask
+            texture_sample = Variable(mu.data.new(mu.size()).normal_())  # gauss noise bs,128 texture
+            input_sample, _ = vae.deco(mask_sample, texture_sample)  # sample
+            errD_sample = netD(input_sample)
+            input_recon = recon
+            errD_recon = netD(input_recon)
+            errD_fake = 0.8 * errD_sample + 0.2 * errD_recon
+            errD_fake.backward(mone,retain_graph=True)
+            errD = errD_real - errD_fake
+            optimizerD.step()
+        ############################
+        # (2) Update VAE
+        ###########################
+        for p in netD.parameters():
+            p.requires_grad = False  # to avoid computation
+        vae.zero_grad()
+        mask_sample = Variable(mu.data.new(mu1.size()).normal_())  # gauss noise bs,256 mask
+        texture_sample = Variable(mu.data.new(mu.size()).normal_())
+        input_sample, _ = vae.deco(mask_sample, texture_sample)
+        loss_image = loss_function(recon, inputv, mu, logvar, mu1, logvar1, opt.batch_size)
+        loss_mask = F.mse_loss(mask0, mask1)
+        loss = 10 *loss_image + 15 * loss_mask
+        loss.backward(retain_graph=True)
+        errDec_sample = netD(input_sample)
+        errDec_sample.backward(one, retain_graph=True)
+        input_recon = recon
+        errDec_recon = netD(input_recon)
+        errDec_sample.backward(one, retain_graph=True)
+        errDec = (errDec_sample + errDec_recon)/2
+        optimizerVae.step()
+        gen_iterations += 1
+
+        if gen_iterations % 200 == 0:
+            print('[%d/%d][%d/%d][%d] Loss_D: %f Loss_G: %f Loss_D_real: %f Loss_D_fake %f'
+                % (epoch, opt.niter, i, len(dataloader), gen_iterations,
+                    errD.data[0], errDec.data[0], errD_real.data[0], errD_fake.data[0]))
+            print('[%d/%d][%d/%d][%d] Loss_D_sample: %f Loss_D_recon: %f Loss_Dec_sample: %f Loss_D_recon %f'
+                % (epoch, opt.niter, i, len(dataloader), gen_iterations,
+                    errD_sample.data[0], errD_recon.data[0], errDec_sample.data[0], errDec_recon.data[0]))
+            print('[%d/%d][%d/%d][%d] Loss_vae: %f Loss_image: %f Loss_mask: %f'
+                % (epoch, opt.niter, i, len(dataloader), gen_iterations,
+                    loss.data[0], loss_image.data[0], loss_mask.data[0]))
+            logging.info('[%d/%d][%d/%d][%d] Loss_D: %f Loss_G: %f Loss_D_real: %f Loss_D_fake %f\n'
+                % (epoch, opt.niter, i, len(dataloader), gen_iterations,
+                    errD.data[0], errDec.data[0], errD_real.data[0], errD_fake.data[0]))
+            logging.info('[%d/%d][%d/%d][%d] Loss_D_sample: %f Loss_D_recon: %f Loss_Dec_sample: %f Loss_D_recon %f\n'
+                % (epoch, opt.niter, i, len(dataloader), gen_iterations,
+                    errD_sample.data[0], errD_recon.data[0], errDec_sample.data[0], errDec_recon.data[0]))
+            logging.info('[%d/%d][%d/%d][%d] Loss_vae: %f Loss_image: %f Loss_mask: %f\n'
+                % (epoch, opt.niter, i, len(dataloader), gen_iterations,
+                    loss.data[0], loss_image.data[0], loss_mask.data[0]))
+
+        if gen_iterations % 200 == 0:
+            vae.eval()
+            real_cpu = real_cpu.mul(0.5).add(0.5)
+            vutils.save_image(real_cpu, '{0}/real_{1}.png'.format(opt.experiment, gen_iterations))
+            input_sample.data = input_sample.data.mul(0.5).add(0.5)
+            vutils.save_image(input_sample.data, '{0}/fake_samples_{1}.png'.format(opt.experiment, gen_iterations))
+            input_recon.data = input_recon.data.mul(0.5).add(0.5)
+            vutils.save_image(input_recon.data, '{0}/recon_{1}.png'.format(opt.experiment, gen_iterations))
+
+        if gen_iterations %10000==0:
+            # save model
+            save_name = './vae_gan/{}_iter_{}.pth.tar'.format('vae', gen_iterations)
+            torch.save({'VAE': vae.state_dict()}, save_name)
+            logging.info('save model to {}'.format(save_name))
+            save_name = './vae_gan/{}_iter_{}.pth.tar'.format('gan', gen_iterations)
+            torch.save({'D': netD.state_dict()}, save_name)
+            logging.info('save model to {}'.format(save_name))
