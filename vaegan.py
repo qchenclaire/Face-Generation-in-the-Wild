@@ -40,7 +40,7 @@ class encoder(nn.Module):
             nn.Conv2d(128,3,1,1,0,bias=False),
             nn.BatchNorm2d(3),
             #nn.LeakyReLU(0.2, inplace=True),
-            nn.Sigmoid()
+            nn.Tanh()
             )
         self.texture=nn.Sequential(
             nn.Conv2d(128, 128, 3, 2, 1, bias=False),
@@ -141,7 +141,13 @@ def loss_function(recon_x, x, mu, logvar,mu1,logvar1, batch_size):
     KLD /= batch_size*64*64*3
     KLD1/= batch_size*64*64*3
 
-    return MSE + KLD + KLD1
+
+    '''print ('logvar')
+    print (logvar.max())
+    print('mu')
+    print(mu.max())
+    '''
+    return 5 * MSE + 50 * KLD + 50 * KLD1
 def entropy_loss(x):
     x1=torch.squeeze(torch.sum(torch.sum(x,2),3))
     return -torch.sum(torch.mul(x,torch.log(x)))+torch.sum(torch.mul(x1,torch.log(x1)))
@@ -182,7 +188,6 @@ class _netD(nn.Module):
             nn.BatchNorm2d(ndf * 8),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
-            nn.Sigmoid()
         )
     def forward(self, input):
         if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:

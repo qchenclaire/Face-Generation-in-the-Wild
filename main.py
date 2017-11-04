@@ -12,14 +12,13 @@ import torch.optim as optim
 import logging
 import pdb
 import random
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
-
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
 parser = argparse.ArgumentParser()
 parser.add_argument('--image_path', type=str, default='./randomcrop_resize_64/')
 parser.add_argument('--num_workers', type=int, default=2)
 parser.add_argument('--image_size', type=int, default=64)
 parser.add_argument('--batch_size', type=int, default=64, help='input batch size')
-parser.add_argument('--lr_vae', type=float, default=0.0002, help='vae learning rate, default=0.001')
+parser.add_argument('--lr_vae', type=float, default=0.0001, help='vae learning rate, default=0.001')
 parser.add_argument('--lr_gan', type=float, default=0.0001, help='gan learning rate, default=0.0002')
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
 parser.add_argument('--cuda', action='store_true', default=True, help='enables cuda')
@@ -35,6 +34,7 @@ parser.add_argument('--ndf', type=int, default=64)
 parser.add_argument('--niter', type=int, default=200, help='number of epochs to train for')
 parser.add_argument('--Diters', type=int, default=1, help='number of D iters per each G iter')
 parser.add_argument('--mlp_D', action='store_true', default = False, help='use MLP for D')
+parser.add_argument('--load_VAE', default='', help="path to VAE (to continue training)")
 opt = parser.parse_args()
 print(opt)
 if opt.experiment is None:
@@ -75,6 +75,11 @@ else:
     netD = dcgan.DCGAN_D(opt.image_size, nz, nc, ndf, ngpu, n_extra_layers)
     netD.apply(weights_init)
 
+if opt.load_VAE != '':
+    checkpoint = torch.load(opt.load_VAE)
+    vae.load_state_dict(checkpoint['VAE'])
+print(netD)
+
 if opt.cuda:
     netD.cuda()
     vae.cuda()
@@ -85,9 +90,6 @@ optimizerD = optim.Adam(netD.parameters(), lr=opt.lr_gan, betas=(opt.beta1, 0.99
 optimizerDec = optim.Adam(vae.deco.parameters(),lr=opt.lr_vae)
 optimizerVae = optim.Adam(vae.parameters(),lr=opt.lr_vae)
 optimizer = optim.Adam(vae.parameters(),lr=opt.lr_vae)
-
-checkpoint = torch.load('vae_iter_260000.pth.tar')
-vae.load_state_dict(checkpoint['VAE'])
 
 gen_iterations = 0
 for epoch in range( opt.niter):
@@ -125,17 +127,20 @@ for epoch in range( opt.niter):
             input.resize_as_(real_cpu).copy_(real_cpu)
             inputv = Variable(input)
             errD_real = netD(inputv)
+            #errD_real = errD_real.mean()
             errD_real.backward(one, retain_graph=True)
 
             # train with fake
             recon, mu, logvar, mu1, logvar1, mask0, mask1 = vae(inputv)
-            mask_sample = Variable(mu.data.new(mu1.size()).normal_())  # gauss noise bs,256 mask
-            texture_sample = Variable(mu.data.new(mu.size()).normal_())  # gauss noise bs,128 texture
-            input_sample, _ = vae.deco(mask_sample, texture_sample)  # sample
+            mask_z = Variable(mu.data.new(mu1.size()).normal_())  # gauss noise bs,256 mask
+            texture_z = Variable(mu.data.new(mu.size()).normal_())  # gauss noise bs,128 texture
+            input_sample, mask_sample = vae.deco(mask_z, texture_z)  # sample
             errD_sample = netD(input_sample)
+            #errD_sample = errD_sample.mean()
             input_recon = recon
             errD_recon = netD(input_recon)
-            errD_fake = 0.8 * errD_sample + 0.2 * errD_recon
+            #errD_recon = errD_recon.mean()
+            errD_fake =  errD_sample +  errD_recon
             errD_fake.backward(mone,retain_graph=True)
             errD = errD_real - errD_fake
             optimizerD.step()
@@ -145,23 +150,29 @@ for epoch in range( opt.niter):
         for p in netD.parameters():
             p.requires_grad = False  # to avoid computation
         vae.zero_grad()
-        mask_sample = Variable(mu.data.new(mu1.size()).normal_())  # gauss noise bs,256 mask
-        texture_sample = Variable(mu.data.new(mu.size()).normal_())
-        input_sample, _ = vae.deco(mask_sample, texture_sample)
+        mask_z = Variable(mu.data.new(mu1.size()).normal_())  # gauss noise bs,256 mask
+        texture_z = Variable(mu.data.new(mu.size()).normal_())
+        input_sample, mask_sample = vae.deco(mask_z, texture_z)
         loss_image = loss_function(recon, inputv, mu, logvar, mu1, logvar1, opt.batch_size)
-        loss_mask = F.mse_loss(mask0, mask1)
-        loss = 10 *loss_image + 15 * loss_mask
-        loss.backward(retain_graph=True)
+
+        loss_mask = F.mse_loss(mask1, mask0)
+        loss_mask.backward(retain_graph=True)
+        vae.enco.zero_grad()
+        loss_image.backward(retain_graph=True)
+        loss = loss_image + loss_mask
+        #loss.backward(retain_graph=True)
         errDec_sample = netD(input_sample)
+        #errDec_sample = 0.8 * errDec_sample.mean()
         errDec_sample.backward(one, retain_graph=True)
         input_recon = recon
         errDec_recon = netD(input_recon)
-        errDec_sample.backward(one, retain_graph=True)
-        errDec = (errDec_sample + errDec_recon)/2
+        #errDec_recon = 0.2 * errDec_recon.mean()
+        errDec_recon.backward(one, retain_graph=True)
+        errDec = 0.8 * errDec_sample + 0.2 * errDec_recon
         optimizerVae.step()
         gen_iterations += 1
 
-        if gen_iterations % 200 == 0:
+        if gen_iterations % 200 == 1:
             print('[%d/%d][%d/%d][%d] Loss_D: %f Loss_G: %f Loss_D_real: %f Loss_D_fake %f'
                 % (epoch, opt.niter, i, len(dataloader), gen_iterations,
                     errD.data[0], errDec.data[0], errD_real.data[0], errD_fake.data[0]))
@@ -180,8 +191,9 @@ for epoch in range( opt.niter):
             logging.info('[%d/%d][%d/%d][%d] Loss_vae: %f Loss_image: %f Loss_mask: %f\n'
                 % (epoch, opt.niter, i, len(dataloader), gen_iterations,
                     loss.data[0], loss_image.data[0], loss_mask.data[0]))
+            print ('logvar: %f mu: %f logvar1: %f mu1:%f' %(logvar.max().data[0], mu.max().data[0], logvar1.max().data[0], mu1.max().data[0]))
 
-        if gen_iterations % 200 == 0:
+        if gen_iterations % 200 == 1:
             vae.eval()
             real_cpu = real_cpu.mul(0.5).add(0.5)
             vutils.save_image(real_cpu, '{0}/real_{1}.png'.format(opt.experiment, gen_iterations))
@@ -189,12 +201,18 @@ for epoch in range( opt.niter):
             vutils.save_image(input_sample.data, '{0}/fake_samples_{1}.png'.format(opt.experiment, gen_iterations))
             input_recon.data = input_recon.data.mul(0.5).add(0.5)
             vutils.save_image(input_recon.data, '{0}/recon_{1}.png'.format(opt.experiment, gen_iterations))
+            mask_sample.data = mask_sample.data.mul(0.5).add(0.5)
+            vutils.save_image(mask_sample.data, '{0}/mask_sample_{1}.png'.format(opt.experiment, gen_iterations))
+            mask0.data = mask0.data.mul(0.5).add(0.5)
+            vutils.save_image(mask0.data, '{0}/mask_encode_{1}.png'.format(opt.experiment, gen_iterations))
+            mask1.data = mask1.data.mul(0.5).add(0.5)
+            vutils.save_image(mask1.data, '{0}/mask_decode_{1}.png'.format(opt.experiment, gen_iterations))
 
-        if gen_iterations %10000==0:
+        if gen_iterations %10000==1:
             # save model
-            save_name = './vae_gan/{}_iter_{}.pth.tar'.format('vae', gen_iterations)
+            save_name = './{}/{}_iter_{}.pth.tar'.format(opt.experiment, 'vae', gen_iterations)
             torch.save({'VAE': vae.state_dict()}, save_name)
             logging.info('save model to {}'.format(save_name))
-            save_name = './vae_gan/{}_iter_{}.pth.tar'.format('gan', gen_iterations)
+            save_name = './{}/{}_iter_{}.pth.tar'.format(opt.experiment,'gan', gen_iterations)
             torch.save({'D': netD.state_dict()}, save_name)
             logging.info('save model to {}'.format(save_name))
